@@ -1,0 +1,6 @@
+Configuration/Spotify.local.xcconfig
+DerivedData/
+build/
+*.xcuserstate
+xcuserdata/
+.DS_Store

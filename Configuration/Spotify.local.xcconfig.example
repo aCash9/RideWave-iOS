@@ -1,0 +1,3 @@
+// Copy to Spotify.local.xcconfig and enter your Spotify developer app client ID.
+// Never add a client secret to the iOS app.
+SPOTIFY_CLIENT_ID = YOUR_SPOTIFY_CLIENT_ID

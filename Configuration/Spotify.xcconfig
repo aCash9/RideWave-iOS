@@ -1,0 +1,2 @@
+SPOTIFY_CLIENT_ID = 0b2b8e3756e746ce89a7a4a08796f4ea
+#include? "Spotify.local.xcconfig"
