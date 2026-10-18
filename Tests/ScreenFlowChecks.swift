@@ -15,6 +15,11 @@ struct ScreenFlowChecks {
         precondition(RideWaveModel(defaults: defaults).page == .connect)
         defaults.set(true, forKey: "spotify_authorized")
         precondition(RideWaveModel(defaults: defaults).page == .connect)
-        print("Screen flow checks passed")
+        precondition(RideWaveModel(defaults: defaults, hasPlaybackSession: true).page == .ride)
+        precondition(RideWaveModel(defaults: defaults, hasPlaybackSession: false).page == .connect)
+        defaults.removeObject(forKey: "onboarding_seen")
+        precondition(RideWaveModel(defaults: defaults, hasPlaybackSession: true).page == .ride)
+        precondition(RideWaveModel(defaults: defaults, hasPlaybackSession: false).page == .tutorial)
+        print("Screen flow checks passed, including restored and absent playback sessions")
     }
 }

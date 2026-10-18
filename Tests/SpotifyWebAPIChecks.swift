@@ -35,6 +35,24 @@ struct SpotifyWebAPIChecks {
         precondition(playlists.map(\.id) == ["1", "2"] && requests == 2)
 
         requests = 0
+        MockSpotifyProtocol.handler = { request in
+            requests += 1
+            precondition(request.url?.path == "/v1/me/playlists")
+            if requests == 1 {
+                return (200, [:], #"{"items":[{"id":"1","name":"One","uri":"spotify:playlist:1"}],"next":"https://api.spotify.com/v1/users/example-user/playlists?offset=50&limit=50"}"#)
+            }
+            let query = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)!.queryItems!
+            precondition(query.contains(URLQueryItem(name: "offset", value: "50")))
+            precondition(query.contains(URLQueryItem(name: "limit", value: "50")))
+            return (200, [:], #"{"items":[{"id":"2","name":"Two","uri":"spotify:playlist:2"}],"next":null}"#)
+        }
+        let paged = try await api.playlists { _ in "test-token" }
+        precondition(paged.map(\.id) == ["1", "2"] && requests == 2)
+        for url in ["https://attacker.example/v1/users/test/playlists", "https://api.spotify.com/v1/users/test/tracks", "https://user@api.spotify.com/v1/users/test/playlists", "https://api.spotify.com/v1/users//playlists", "https://api.spotify.com/v1/users/test/playlists/extra"] {
+            precondition(SpotifyWebAPI.normalizedPlaylistURL(URL(string: url)!) == nil)
+        }
+
+        requests = 0
         var refreshed = false
         MockSpotifyProtocol.handler = { request in
             requests += 1
@@ -54,17 +72,18 @@ struct SpotifyWebAPIChecks {
             do { _ = try await api.playlists { _ in "test-token" }; fatalError("Expected HTTP failure") }
             catch let error as SpotifyError {
                 switch (status, error) {
-                case (401, .authorization), (403, .forbidden), (429, .rateLimited("5")), (500, .invalidResponse): break
+                case (401, .authorization), (403, .forbidden), (429, .rateLimited("5")), (500, .httpStatus(500)): break
                 default: fatalError("Wrong error")
                 }
             }
             precondition(requests == (status == 401 ? 2 : 1))
         }
-        for next in ["https://attacker.example/playlists", "http://api.spotify.com/v1/me/playlists", "https://api.spotify.com/v1/me/playlists?limit=50"] {
+        for next in ["https://attacker.example/playlists", "http://api.spotify.com/v1/me/playlists", "https://api.spotify.com/v1/me/playlists?limit=50", "https://api.spotify.com/v1/users/example-user/playlists?limit=50"] {
             requests = 0
             MockSpotifyProtocol.handler = { _ in requests += 1; return (200, [:], "{\"items\":[],\"next\":\"\(next)\"}") }
             do { _ = try await api.playlists { _ in "test-token" }; fatalError("Expected pagination rejection") }
             catch SpotifyError.invalidResponse {}
+            catch SpotifyError.pagination {}
             precondition(requests == 1)
         }
         MockSpotifyProtocol.handler = { _ in (200, [:], "invalid JSON") }
@@ -75,7 +94,9 @@ struct SpotifyWebAPIChecks {
         catch let error as URLError { precondition(error.code == .timedOut) }
 
         precondition(SpotifyConfiguration.accepts(URL(string: "ridewave://callback?code=example")!))
-        for url in ["other://callback", "ridewave://wrong", "ridewave://callback/extra", "ridewave://user@callback"] {
+        precondition(SpotifyConfiguration.accepts(URL(string: "ridewave://callback/?code=example&state=example")!))
+        precondition(SpotifyConfiguration.accepts(URL(string: "ridewave://callback/#access_token=example")!))
+        for url in ["ridewave://callback//", "ridewave://callback:123", "other://callback", "ridewave://wrong", "ridewave://callback/extra", "ridewave://user@callback"] {
             precondition(!SpotifyConfiguration.accepts(URL(string: url)!))
         }
         print("Spotify checks passed: pagination, deduplication, 401 renewal/retry limit, HTTP errors, hostile/cyclic pagination, decoding, timeout, callback routing")

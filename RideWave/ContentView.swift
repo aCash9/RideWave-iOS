@@ -2,9 +2,16 @@ import SwiftUI
 import UIKit
 
 struct ContentView: View {
-    @StateObject private var model = RideWaveModel()
-    @StateObject private var spotify = SpotifyController()
+    @StateObject private var model: RideWaveModel
+    @StateObject private var spotify: SpotifyController
+    @StateObject private var playlistSpotify = SpotifyController(forPlaylists: true)
     @Environment(\.scenePhase) private var scenePhase
+
+    init() {
+        let playback = SpotifyController()
+        _spotify = StateObject(wrappedValue: playback)
+        _model = StateObject(wrappedValue: RideWaveModel(hasPlaybackSession: playback.authorized))
+    }
 
     var body: some View {
         ZStack {
@@ -35,7 +42,7 @@ struct ContentView: View {
                         Text(message).font(.callout)
                             .accessibilityIdentifier("connection.message")
                     }
-                    Button(spotify.busy ? "Connecting…" : "Connect Spotify") { spotify.authorize(playback: true) }
+                    Button(spotify.busy ? spotify.progressTitle : "Connect Spotify") { spotify.authorize(playback: true) }
                         .buttonStyle(RideButtonStyle())
                         .disabled(spotify.busy || spotify.loadingPlaylists)
                     Text("Connecting playback opens Spotify and may resume your music.")
@@ -45,25 +52,10 @@ struct ContentView: View {
                         Button("Cancel connection", action: spotify.cancel)
                             .frame(minHeight: 44)
                     }
-                    if spotify.authorized {
-                        Button(spotify.loadingPlaylists ? "Checking playlists…" : "Check Web API playlist access", action: spotify.checkWebAPI)
-                            .buttonStyle(RideButtonStyle())
-                            .disabled(spotify.busy || spotify.loadingPlaylists)
-                        Button("Forget Spotify account", action: spotify.signOut).frame(minHeight: 44)
-                    } else {
-                        Button("Connect Web API only") { spotify.authorize(playback: false) }
-                            .buttonStyle(RideButtonStyle())
-                            .disabled(spotify.busy || spotify.loadingPlaylists)
-                    }
-                    Button("Preview ride screen") { spotify.stopPlayback(); model.page = .ride }
-                        .buttonStyle(RideButtonStyle())
-                        .disabled(spotify.busy || spotify.loadingPlaylists)
-                    Button("View tutorial") { model.page = .tutorial }
-                        .frame(minHeight: 44).frame(maxWidth: .infinity)
-                        .disabled(spotify.busy || spotify.loadingPlaylists)
+
                 }
             case .ride:
-                RideView(spotify: spotify) { spotify.stopPlayback(); model.page = .connect }
+                RideView(spotify: spotify, playlistSpotify: playlistSpotify) { spotify.stopPlayback(); model.page = .connect }
             }
         }
         .foregroundStyle(.white)
@@ -73,14 +65,22 @@ struct ContentView: View {
         .onChange(of: scenePhase, initial: true) {
             updateIdleTimer()
             spotify.setActive(scenePhase == .active)
+            playlistSpotify.setActive(scenePhase == .active)
         }
         .onChange(of: spotify.connected) {
             if spotify.connected { model.page = .ride }
         }
-        .onOpenURL { spotify.handleURL($0) }
+        .onChange(of: spotify.authorized) {
+            if !spotify.authorized && model.page == .ride { model.page = .connect }
+        }
+        .onOpenURL {
+            spotify.handleURL($0)
+            playlistSpotify.handleURL($0)
+        }
         .onDisappear {
             UIApplication.shared.isIdleTimerDisabled = false
             spotify.setActive(false)
+            playlistSpotify.setActive(false)
         }
     }
 
@@ -112,8 +112,10 @@ private struct SetupPage<Content: View>: View {
 
 private struct RideView: View {
     @ObservedObject var spotify: SpotifyController
+    @ObservedObject var playlistSpotify: SpotifyController
+    @State private var playlistsOpen = false
     let close: () -> Void
-    @State private var notice: String?
+    @State private var contactsOpen = false
 
     var body: some View {
         GeometryReader { geometry in
@@ -153,8 +155,13 @@ private struct RideView: View {
                     .padding(.bottom, landscape ? 56 : 88)
                 }.allowsHitTesting(false)
                 if let message = spotify.message {
-                    Text(message).font(.callout).multilineTextAlignment(.center)
-                        .padding(32).allowsHitTesting(false)
+                    VStack(spacing: 16) {
+                        Text(message).font(.callout).multilineTextAlignment(.center)
+                        if !spotify.connected && !spotify.busy {
+                            Button("Reconnect Spotify") { spotify.authorize(playback: true) }
+                                .buttonStyle(RideButtonStyle())
+                        }
+                    }.frame(maxWidth: 360).padding(32)
                 }
                 VStack {
                     HStack {
@@ -164,22 +171,24 @@ private struct RideView: View {
                     Spacer()
                     HStack {
                         iconButton("music.note.list", label: "Playlists") {
-                            notice = "Use Check Web API playlist access on the connection page to verify your library. Playlist selection is coming in the next step."
+                            playlistsOpen = true
                         }
                         Spacer()
                         iconButton("person.2", label: "Ride contacts") {
-                            notice = "Ride contacts will be added in a later step."
+                            contactsOpen = true
                         }
                     }
                 }.padding(8)
             }
         }
-        .alert("Coming in a later step", isPresented: Binding(
-            get: { notice != nil }, set: { if !$0 { notice = nil } }
-        )) {
-            Button("OK") { notice = nil }
-        } message: {
-            Text(notice ?? "")
+        .accessibilityHidden(playlistsOpen || contactsOpen)
+        .overlay {
+            if playlistsOpen {
+                RidePlaylistsView(library: playlistSpotify, playback: spotify) { playlistsOpen = false }
+            }
+            if contactsOpen {
+                RideContactsView { contactsOpen = false }
+            }
         }
     }
 

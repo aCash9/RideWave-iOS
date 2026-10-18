@@ -1,2 +1,3 @@
-SPOTIFY_CLIENT_ID = 0b2b8e3756e746ce89a7a4a08796f4ea
+// Supply your client ID in the ignored Spotify.local.xcconfig file.
+SPOTIFY_CLIENT_ID =
 #include? "Spotify.local.xcconfig"

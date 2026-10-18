@@ -11,9 +11,9 @@ final class RideWaveModel: ObservableObject {
     @Published var page: RidePage
     private let defaults: UserDefaults
 
-    init(defaults: UserDefaults = .standard) {
+    init(defaults: UserDefaults = .standard, hasPlaybackSession: Bool = false) {
         self.defaults = defaults
-        page = defaults.bool(forKey: "onboarding_seen") ? .connect : .tutorial
+        page = hasPlaybackSession ? .ride : (defaults.bool(forKey: "onboarding_seen") ? .connect : .tutorial)
         #if DEBUG
         if let index = ProcessInfo.processInfo.arguments.firstIndex(of: "-preview-page"),
            ProcessInfo.processInfo.arguments.indices.contains(index + 1),

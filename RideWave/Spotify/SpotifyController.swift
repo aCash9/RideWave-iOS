@@ -8,14 +8,21 @@ final class SpotifyController: NSObject, ObservableObject, SPTSessionManagerDele
                                SPTAppRemoteDelegate, SPTAppRemotePlayerStateDelegate {
     @Published private(set) var connected = false
     @Published private(set) var busy = false
+    @Published private(set) var progressTitle = "Authorizing…"
     @Published private(set) var authorized = false
     @Published private(set) var message: String?
     @Published private(set) var trackTitle = "Your next soundtrack"
     @Published private(set) var trackArtist = "Choose a song in Spotify"
     @Published private(set) var paused = true
     @Published private(set) var hasPlayerState = false
+    @Published private(set) var playlists: [SpotifyPlaylist] = []
     @Published private(set) var playlistCount: Int?
     @Published private(set) var loadingPlaylists = false
+
+    @Published private(set) var startingPlaylist = false
+    @Published private(set) var playlistPlaybackMessage: String?
+    private var playbackRequestID = UUID()
+    private var playbackDeadline: Task<Void, Never>?
 
     private var manager: SPTSessionManager?
     private var remote: SPTAppRemote?
@@ -29,10 +36,15 @@ final class SpotifyController: NSObject, ObservableObject, SPTSessionManagerDele
     private var playlistRequestID = UUID()
     private var refreshWaiters = [CheckedContinuation<String, Error>]()
     private let webAPI = SpotifyWebAPI()
-    private let store = SpotifySessionStore(account: SpotifyConfiguration.clientID + "|" + SpotifyConfiguration.redirectURL.absoluteString)
-    private let scopes: SPTScope = [.appRemoteControl, .playlistReadPrivate, .playlistReadCollaborative]
+    private let store: SpotifySessionStore
+    private let scopes: SPTScope
+    private let forPlaylists: Bool
 
-    override init() {
+    init(forPlaylists: Bool = false) {
+        self.forPlaylists = forPlaylists
+        scopes = forPlaylists ? [.playlistReadPrivate, .playlistReadCollaborative] : [.appRemoteControl]
+        let account = SpotifyConfiguration.clientID + "|" + SpotifyConfiguration.redirectURL.absoluteString
+        store = SpotifySessionStore(account: account + (forPlaylists ? "|playlists" : ""))
         super.init()
         // Remove the obsolete prototype's unencrypted token and simulated connection flag.
         UserDefaults.standard.removeObject(forKey: "spotify_access_token")
@@ -45,8 +57,24 @@ final class SpotifyController: NSObject, ObservableObject, SPTSessionManagerDele
                session.scope.contains(scopes) {
                 manager?.session = session
                 authorized = true
+                wantsPlayback = !forPlaylists
+                if !forPlaylists { message = "Reconnecting to Spotify…" }
+                trace("Saved session restored; playlists=\(forPlaylists)")
             }
         } catch { message = error.localizedDescription }
+    }
+
+    private func trace(_ event: String, error: Error? = nil) {
+        #if DEBUG
+        var detail = ""
+        var current = error as NSError?
+        for _ in 0..<4 {
+            guard let value = current else { break }
+            detail += " [\(value.domain):\(value.code)]"
+            current = value.userInfo[NSUnderlyingErrorKey] as? NSError
+        }
+        print("[RideWave Spotify] \(event)\(detail)")
+        #endif
     }
 
     private func makeManager(playback: Bool) -> SPTSessionManager {
@@ -66,27 +94,35 @@ final class SpotifyController: NSObject, ObservableObject, SPTSessionManagerDele
             message = "Install and sign in to Spotify on your iPhone to connect playback. Web API access can be tested separately."
             return
         }
+        trace("Authorization started; playback=\(playback)")
         stopPlayback()
         wantsPlayback = playback
         manager?.delegate = nil
         manager = makeManager(playback: playback)
         authorizing = true
         busy = true
+        progressTitle = "Authorizing…"
         message = "Waiting for Spotify authorization…"
         startDeadline(seconds: 120)
         manager?.initiateSession(with: scopes, options: .default, campaign: nil)
     }
 
     func handleURL(_ url: URL) {
+        trace("URL received; pending=\(authorizing), schemeMatch=\(url.scheme == SpotifyConfiguration.redirectURL.scheme), hostMatch=\(url.host == SpotifyConfiguration.redirectURL.host), rootSlash=\(url.path == "/"), accepted=\(SpotifyConfiguration.accepts(url))")
         guard authorizing, SpotifyConfiguration.accepts(url), let manager else { return }
+        trace("Authorization callback received")
+        progressTitle = "Authorizing…"
+        message = "Completing Spotify authorization…"
         if !manager.application(UIApplication.shared, open: url, options: [:]) {
             fail(SpotifyError.authorization)
         }
     }
 
     func setActive(_ value: Bool) {
+        trace("Scene active=\(value)")
         active = value
         if !value {
+            finishPlaylistPlayback(message: startingPlaylist ? "Playback interrupted. Tap the playlist again after reconnecting." : nil)
             connectionID = UUID()
             connectionTask?.cancel()
             connectionTask = nil
@@ -132,12 +168,15 @@ final class SpotifyController: NSObject, ObservableObject, SPTSessionManagerDele
         remote.delegate = self
         remote.connectionParameters.accessToken = token
         busy = true
+        progressTitle = "Connecting…"
         message = "Connecting to Spotify…"
         startDeadline(seconds: 20)
+        trace("App Remote connection started")
         remote.connect()
     }
 
     func stopPlayback() {
+        finishPlaylistPlayback(message: startingPlaylist ? SpotifyError.disconnected.localizedDescription : nil)
         wantsPlayback = false
         connectionID = UUID()
         connectionTask?.cancel()
@@ -174,6 +213,7 @@ final class SpotifyController: NSObject, ObservableObject, SPTSessionManagerDele
         manager?.session = nil
         authorized = false
         playlistCount = nil
+        playlists = []
         trackTitle = "Your next soundtrack"
         trackArtist = "Choose a song in Spotify"
         paused = true
@@ -188,6 +228,7 @@ final class SpotifyController: NSObject, ObservableObject, SPTSessionManagerDele
             refreshWaiters.append(continuation)
             if refreshWaiters.count == 1 {
                 busy = true
+                progressTitle = "Renewing session…"
                 startDeadline(seconds: 25)
                 manager?.renewSession()
             }
@@ -220,11 +261,57 @@ final class SpotifyController: NSObject, ObservableObject, SPTSessionManagerDele
                     try await self.accessToken(forceRefresh: force)
                 }
                 try Task.checkCancellation()
+                self.playlists = playlists
                 self.playlistCount = playlists.count
                 self.message = "Web API connected. Found \(playlists.count) playlists."
             } catch is CancellationError {
             } catch {
                 if !Task.isCancelled { self.message = error.localizedDescription }
+            }
+        }
+    }
+
+    func clearPlaylistFeedback() { playlistPlaybackMessage = nil }
+
+    private func finishPlaylistPlayback(message: String?) {
+        playbackRequestID = UUID()
+        playbackDeadline?.cancel()
+        playbackDeadline = nil
+        startingPlaylist = false
+        if let message { playlistPlaybackMessage = message }
+    }
+
+    func playPlaylist(_ playlist: SpotifyPlaylist) {
+        guard !startingPlaylist else { return }
+        guard connected, let remote, let player = remote.playerAPI else {
+            playlistPlaybackMessage = SpotifyError.disconnected.localizedDescription
+            return
+        }
+        guard playlist.uri == "spotify:playlist:" + playlist.id else {
+            playlistPlaybackMessage = "This playlist cannot be played. Refresh your library and try again."
+            return
+        }
+        let requestID = UUID()
+        playbackRequestID = requestID
+        startingPlaylist = true
+        playlistPlaybackMessage = nil
+        playbackDeadline = Task { [weak self] in
+            do { try await Task.sleep(for: .seconds(15)) } catch { return }
+            guard let self, self.playbackRequestID == requestID else { return }
+            self.finishPlaylistPlayback(message: "Spotify did not confirm playback. Check Spotify before trying again.")
+        }
+        player.play(playlist.uri) { [weak self, weak remote] _, error in
+            guard let self, let remote, self.remote === remote,
+                  self.playbackRequestID == requestID else { return }
+            guard error == nil else {
+                self.finishPlaylistPlayback(message: "Spotify could not play this playlist. Check Spotify and try again.")
+                return
+            }
+            player.setShuffle(true) { [weak self, weak remote] _, error in
+                guard let self, let remote, self.remote === remote,
+                      self.playbackRequestID == requestID else { return }
+                self.finishPlaylistPlayback(message: error == nil ? nil :
+                    "Playback started, but Spotify could not enable shuffle.")
             }
         }
     }
@@ -251,11 +338,13 @@ final class SpotifyController: NSObject, ObservableObject, SPTSessionManagerDele
         deadline?.cancel()
         deadline = Task { [weak self] in
             do { try await Task.sleep(for: .seconds(seconds)) } catch { return }
+            self?.trace("Connection deadline expired")
             self?.fail(SpotifyError.timeout)
         }
     }
 
     private func fail(_ error: Error) {
+        trace("Connection failed", error: error)
         let wasAuthorizing = authorizing
         let savedSession = manager?.session
         manager?.delegate = nil
@@ -269,10 +358,16 @@ final class SpotifyController: NSObject, ObservableObject, SPTSessionManagerDele
         if wasAuthorizing {
             authorized = false
         }
+        if let spotifyError = error as? SpotifyError, case .authorization = spotifyError {
+            manager?.session = nil
+            authorized = false
+            try? store.delete()
+        }
         message = error.localizedDescription
     }
 
     private func accept(_ session: SPTSession) {
+        trace("Session accepted; expired=\(session.isExpired)")
         deadline?.cancel()
         authorizing = false
         busy = false
@@ -283,6 +378,7 @@ final class SpotifyController: NSObject, ObservableObject, SPTSessionManagerDele
         } catch { message = "Authorized for this session, but secure storage failed. You may need to sign in again." }
         finishRefresh(.success(session.accessToken))
         if wantsPlayback && active { reconnect() }
+        if forPlaylists && !loadingPlaylists { checkWebAPI() }
     }
 
     func sessionManager(manager: SPTSessionManager, didInitiate session: SPTSession) {
@@ -295,10 +391,12 @@ final class SpotifyController: NSObject, ObservableObject, SPTSessionManagerDele
     }
     func sessionManager(manager: SPTSessionManager, didFailWith error: Error) {
         guard manager === self.manager else { return }
+        trace("Session authorization failed", error: error)
         fail(SpotifyError.authorization)
     }
     func appRemoteDidEstablishConnection(_ appRemote: SPTAppRemote) {
         guard appRemote === remote, active, wantsPlayback else { appRemote.disconnect(); return }
+        trace("App Remote connected")
         deadline?.cancel()
         connected = true
         busy = false
@@ -315,10 +413,12 @@ final class SpotifyController: NSObject, ObservableObject, SPTSessionManagerDele
     }
     func appRemote(_ appRemote: SPTAppRemote, didDisconnectWithError error: Error?) {
         guard appRemote === remote else { return }
+        trace("App Remote disconnected or failed", error: error)
         fail(SpotifyError.disconnected)
     }
     func appRemote(_ appRemote: SPTAppRemote, didFailConnectionAttemptWithError error: Error?) {
         guard appRemote === remote else { return }
+        trace("App Remote disconnected or failed", error: error)
         fail(SpotifyError.disconnected)
     }
     func playerStateDidChange(_ playerState: SPTAppRemotePlayerState) {
