@@ -5,35 +5,54 @@ struct ContentView: View {
     @StateObject private var model: RideWaveModel
     @StateObject private var spotify: SpotifyController
     @StateObject private var playlistSpotify = SpotifyController(forPlaylists: true)
+    @State private var orientationMessage: String?
     @Environment(\.scenePhase) private var scenePhase
 
     init() {
         let playback = SpotifyController()
         _spotify = StateObject(wrappedValue: playback)
-        _model = StateObject(wrappedValue: RideWaveModel(hasPlaybackSession: playback.authorized))
+        _model = StateObject(wrappedValue: RideWaveModel())
     }
 
     var body: some View {
         ZStack {
             Color.black.ignoresSafeArea()
             switch model.page {
-            case .tutorial:
+            case .setup:
                 SetupPage {
-                    Text("Your music.\nA simple gesture.")
-                        .font(.largeTitle.weight(.medium))
-                    Text("Control Spotify with a tap or swipe. Ride mode keeps your clock and music on a black screen.")
+                    Text("Ready for your ride?").font(.largeTitle.weight(.medium))
+                    Text("Set up your screen before heading out. Your preferences are saved for next time.")
                         .foregroundStyle(.secondary)
-                    GestureRow(title: "Tap anywhere", detail: "Play or pause")
-                    GestureRow(title: "Swipe left", detail: "Next track")
-                    GestureRow(title: "Swipe right", detail: "Previous track")
-                    Text("Connect before setting off.")
-                        .font(.footnote).foregroundStyle(.secondary)
-                    Button("Continue", action: model.completeTutorial)
-                        .buttonStyle(RideButtonStyle())
-                        .accessibilityIdentifier("tutorial.continue")
+                    Button("Start ride") {
+                        model.startRide(connected: spotify.connected)
+                        spotify.startRide()
+                    }
+                    .buttonStyle(RideButtonStyle())
+                    .accessibilityIdentifier("setup.startRide")
+                    VStack(alignment: .leading, spacing: 12) {
+                        Text("Ride orientation").font(.headline)
+                        Picker("Ride orientation", selection: $model.orientation) {
+                            ForEach(RideOrientation.allCases) { Text($0.title).tag($0) }
+                        }
+                        .pickerStyle(.menu)
+                        Text("Applies when you start a ride. Auto follows device rotation settings.")
+                            .font(.footnote).foregroundStyle(.secondary)
+                    }
+                    Toggle(isOn: $model.keepScreenAwake) {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Keep screen awake").font(.headline)
+                            Text("Prevent the screen from sleeping during a ride.")
+                                .font(.footnote).foregroundStyle(.secondary)
+                        }
+                    }
+                    GestureRow(title: "Tap to play or pause", detail: "Double-tap to add to Liked Songs.")
+                    GestureRow(title: "Swipe left / right", detail: "Next / previous track")
+                    if let orientationMessage { Text(orientationMessage).font(.footnote) }
                 }
             case .connect:
                 SetupPage {
+                    Button("Back to setup") { spotify.cancel(); model.closeRide() }
+                        .frame(minHeight: 44)
                     Text("Connect your soundtrack.")
                         .font(.largeTitle.weight(.medium))
                     Text("Open Spotify and sign in on this device, then connect your account.")
@@ -55,20 +74,26 @@ struct ContentView: View {
 
                 }
             case .ride:
-                RideView(spotify: spotify, playlistSpotify: playlistSpotify) { spotify.stopPlayback(); model.page = .connect }
+                RideView(spotify: spotify, playlistSpotify: playlistSpotify, orientationMessage: orientationMessage) { spotify.stopPlayback(); model.closeRide() }
             }
+        }
+        .background {
+            RideOrientationController(orientation: model.page == .ride ? model.orientation : .auto) {
+                orientationMessage = $0
+            }.frame(width: 0, height: 0)
         }
         .foregroundStyle(.white)
         .preferredColorScheme(.dark)
         .statusBarHidden(true)
-        .onChange(of: model.page, initial: true) { updateIdleTimer() }
+        .onChange(of: model.page, initial: true) { updateIdleTimer(); orientationMessage = nil }
+        .onChange(of: model.keepScreenAwake) { updateIdleTimer() }
         .onChange(of: scenePhase, initial: true) {
             updateIdleTimer()
             spotify.setActive(scenePhase == .active)
             playlistSpotify.setActive(scenePhase == .active)
         }
         .onChange(of: spotify.connected) {
-            if spotify.connected { model.page = .ride }
+            if spotify.connected { model.connectionEstablished() }
         }
         .onChange(of: spotify.authorized) {
             if !spotify.authorized && model.page == .ride { model.page = .connect }
@@ -85,7 +110,7 @@ struct ContentView: View {
     }
 
     private func updateIdleTimer() {
-        UIApplication.shared.isIdleTimerDisabled = model.page == .ride && scenePhase == .active
+        UIApplication.shared.isIdleTimerDisabled = model.page == .ride && model.keepScreenAwake && scenePhase == .active
     }
 }
 
@@ -113,6 +138,7 @@ private struct SetupPage<Content: View>: View {
 private struct RideView: View {
     @ObservedObject var spotify: SpotifyController
     @ObservedObject var playlistSpotify: SpotifyController
+    let orientationMessage: String?
     @State private var playlistsOpen = false
     let close: () -> Void
     @State private var contactsOpen = false
@@ -125,8 +151,11 @@ private struct RideView: View {
                     .gesture(DragGesture(minimumDistance: 60).onEnded { value in
                         guard abs(value.translation.width) > abs(value.translation.height) else { return }
                         spotify.perform(value.translation.width < 0 ? .next : .previous)
-                    }.exclusively(before: TapGesture().onEnded { spotify.perform(.toggle) }))
+                    }.exclusively(before:
+                        TapGesture(count: 2).onEnded { spotify.likeCurrentTrack() }
+                            .exclusively(before: TapGesture().onEnded { spotify.perform(.toggle) })))
                     .accessibilityLabel("Ride playback controls")
+                    .accessibilityAction(named: "Add to Liked Songs") { spotify.likeCurrentTrack() }
                     .accessibilityAction(named: "Play or pause") { spotify.perform(.toggle) }
                     .accessibilityAction(named: "Next track") { spotify.perform(.next) }
                     .accessibilityAction(named: "Previous track") { spotify.perform(.previous) }
@@ -154,9 +183,21 @@ private struct RideView: View {
                     .padding(.horizontal, landscape ? 88 : 28)
                     .padding(.bottom, landscape ? 56 : 88)
                 }.allowsHitTesting(false)
+                if let orientationMessage {
+                    VStack {
+                        Text(orientationMessage).font(.footnote).multilineTextAlignment(.center)
+                            .padding(.horizontal, 72).padding(.top, 8)
+                        Spacer()
+                    }.allowsHitTesting(false)
+                }
+                if let feedback = spotify.likeFeedback, spotify.message == nil {
+                    Text(feedback).font(.title3).multilineTextAlignment(.center)
+                        .padding(32).allowsHitTesting(false)
+                        .accessibilityAddTraits(.updatesFrequently)
+                }
                 if let message = spotify.message {
                     VStack(spacing: 16) {
-                        Text(message).font(.callout).multilineTextAlignment(.center)
+                        Text(spotify.likeFeedback ?? message).font(.callout).multilineTextAlignment(.center)
                         if !spotify.connected && !spotify.busy {
                             Button("Reconnect Spotify") { spotify.authorize(playback: true) }
                                 .buttonStyle(RideButtonStyle())

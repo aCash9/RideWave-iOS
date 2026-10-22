@@ -57,8 +57,7 @@ final class SpotifyController: NSObject, ObservableObject, SPTSessionManagerDele
                session.scope.contains(scopes) {
                 manager?.session = session
                 authorized = true
-                wantsPlayback = !forPlaylists
-                if !forPlaylists { message = "Reconnecting to Spotify…" }
+                // Restore authorization, but wait for Start ride before reconnecting.
                 trace("Saved session restored; playlists=\(forPlaylists)")
             }
         } catch { message = error.localizedDescription }
@@ -122,6 +121,7 @@ final class SpotifyController: NSObject, ObservableObject, SPTSessionManagerDele
         trace("Scene active=\(value)")
         active = value
         if !value {
+            cancelLike()
             finishPlaylistPlayback(message: startingPlaylist ? "Playback interrupted. Tap the playlist again after reconnecting." : nil)
             connectionID = UUID()
             connectionTask?.cancel()
@@ -136,6 +136,11 @@ final class SpotifyController: NSObject, ObservableObject, SPTSessionManagerDele
         } else if wantsPlayback && !authorizing && !connected {
             reconnect()
         }
+    }
+
+    func startRide() {
+        wantsPlayback = true
+        if authorized { reconnect() }
     }
 
     func reconnect() {
@@ -176,6 +181,7 @@ final class SpotifyController: NSObject, ObservableObject, SPTSessionManagerDele
     }
 
     func stopPlayback() {
+        cancelLike()
         finishPlaylistPlayback(message: startingPlaylist ? SpotifyError.disconnected.localizedDescription : nil)
         wantsPlayback = false
         connectionID = UUID()
@@ -312,6 +318,87 @@ final class SpotifyController: NSObject, ObservableObject, SPTSessionManagerDele
                       self.playbackRequestID == requestID else { return }
                 self.finishPlaylistPlayback(message: error == nil ? nil :
                     "Playback started, but Spotify could not enable shuffle.")
+            }
+        }
+    }
+
+    @Published private(set) var likeFeedback: String?
+    private var likeRequestID: UUID?
+    private var likeDeadline: Task<Void, Never>?
+    private var likeFeedbackTask: Task<Void, Never>?
+
+    private func cancelLike() {
+        likeRequestID = nil
+        likeDeadline?.cancel()
+        likeDeadline = nil
+        likeFeedbackTask?.cancel()
+        likeFeedback = nil
+    }
+
+    private func finishLike(_ text: String) {
+        likeRequestID = nil
+        likeDeadline?.cancel()
+        likeDeadline = nil
+        likeFeedbackTask?.cancel()
+        likeFeedback = text
+        UIAccessibility.post(notification: .announcement, argument: text)
+        likeFeedbackTask = Task { [weak self] in
+            do { try await Task.sleep(for: .seconds(2)) } catch { return }
+            self?.likeFeedback = nil
+        }
+    }
+
+    func likeCurrentTrack() {
+        guard likeRequestID == nil else { return }
+        guard connected, let remote, let player = remote.playerAPI, let user = remote.userAPI else {
+            finishLike("Spotify is disconnected. Reconnect and try again.")
+            return
+        }
+        let request = UUID()
+        likeRequestID = request
+        likeFeedbackTask?.cancel()
+        likeFeedback = "Adding to Liked Songs…"
+        likeDeadline = Task { [weak self] in
+            do { try await Task.sleep(for: .seconds(15)) } catch { return }
+            guard let self, self.likeRequestID == request else { return }
+            self.finishLike("Could not confirm the like. Check Spotify and try again.")
+        }
+        player.getPlayerState { [weak self, weak remote] result, error in
+            guard let self, let remote, self.remote === remote, self.likeRequestID == request else { return }
+            guard error == nil, let state = result as? SPTAppRemotePlayerState else {
+                self.finishLike("Could not read the current song. Try again.")
+                return
+            }
+            let uri = state.track.uri
+            guard uri.hasPrefix("spotify:track:") else {
+                self.finishLike("Play a Spotify song first. This item cannot be liked.")
+                return
+            }
+            user.fetchLibraryState(forURI: uri) { [weak self, weak remote] result, error in
+                guard let self, let remote, self.remote === remote, self.likeRequestID == request else { return }
+                guard error == nil, let library = result as? SPTAppRemoteLibraryState else {
+                    self.finishLike("Could not check Liked Songs. Try again.")
+                    return
+                }
+                if library.isAdded { self.finishLike("Already in Liked Songs"); return }
+                guard library.canAdd else { self.finishLike("This song cannot be added to Liked Songs."); return }
+                user.addItemToLibrary(withURI: uri) { [weak self, weak remote] _, error in
+                    guard let self, let remote, self.remote === remote, self.likeRequestID == request else { return }
+                    guard error == nil else {
+                        self.finishLike("Could not like this song. Check Spotify and try again.")
+                        return
+                    }
+                    // SpotifyiOS 5.0.1 can return an acknowledgement wrapped as a library
+                    // state whose isAdded getter throws an Objective-C exception. Do not
+                    // inspect the mutation payload; fetch the actual library state instead.
+                    user.fetchLibraryState(forURI: uri) { [weak self, weak remote] result, error in
+                        guard let self, let remote, self.remote === remote,
+                              self.likeRequestID == request else { return }
+                        let saved = (result as? SPTAppRemoteLibraryState)?.isAdded == true
+                        self.finishLike(error == nil && saved ? "Added to Liked Songs" :
+                            "Could not confirm the like. Check Spotify and try again.")
+                    }
+                }
             }
         }
     }

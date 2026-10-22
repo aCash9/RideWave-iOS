@@ -4,10 +4,11 @@ RideWave is a SwiftUI app for controlling Spotify with simple gestures, opening 
 
 ## Features
 
-- One-time gesture tutorial followed by Spotify playback connection.
-- Returning users open ride mode with their saved session while Spotify reconnects.
-- Tap to play/pause, swipe left for the next track, and swipe right for the previous track.
-- Large clock and live Spotify track, artist, and playback state; the display stays awake while ride mode is active.
+- Setup screen on every fresh launch with a **Start ride** button.
+- Saved Auto/Portrait/Landscape ride orientation and **Keep screen awake** preference (on by default).
+- Saved Spotify sessions reconnect when you start a ride.
+- Tap to play/pause, double-tap to add the current song to Liked Songs, swipe left for the next track, and swipe right for the previous track.
+- Large clock and live Spotify track, artist, and playback state; the display stays awake during ride mode when enabled.
 - Up to four saved playlist bubbles, with cover artwork and shuffle playback.
 - Up to four saved contact numbers, chosen through the native contact picker and called through iOS confirmation.
 - Separate Spotify playback and playlist authorization, cancellation/timeouts, and reconnect feedback.
@@ -41,11 +42,17 @@ Without a local client ID, the app builds and displays setup feedback when conne
 
 ## Spotify connections and ride mode
 
-Onboarding offers only **Connect Spotify**, which uses `SPTSessionManager` PKCE authorization and App Remote playback access. Authorization opens Spotify and may resume music so Spotify is available for the remote connection. The first successful connection opens ride mode.
+**Start ride** reconnects a saved playback session or opens the connection page. **Connect Spotify** uses `SPTSessionManager` PKCE authorization and App Remote playback access. Authorization opens Spotify and may resume music so Spotify is available for the remote connection. The first successful connection opens ride mode.
 
-Playback sessions, including refresh tokens, are stored in device-only Keychain storage, scoped to the client ID and redirect URI. Relaunch restores the session and opens ride mode while reconnecting; expired tokens are renewed when possible. Invalid/revoked authorization requires reconnection. App Remote disconnects when the scene becomes inactive and reconnects on return while ride mode is wanted. Closing ride mode stops reconnection.
+Playback sessions, including refresh tokens, are stored in device-only Keychain storage, scoped to the client ID and redirect URI. Relaunch restores the session but stays on setup until **Start ride**; expired tokens are renewed when possible. Invalid/revoked authorization requires reconnection. App Remote disconnects when the scene becomes inactive and reconnects on return while ride mode is wanted. Closing ride mode stops reconnection and returns to setup. **Back to setup** cancels a pending connection. A late connection callback never skips setup.
 
 Authorization and connection attempts time out and can be cancelled. Callback validation accepts the configured URI with an optional root slash; other hosts, paths, ports, or credentials are rejected. Debug diagnostics omit tokens and complete callback URLs.
+
+## Ride setup and double-tap
+
+Orientation and screen-awake preferences save immediately in UserDefaults and persist across launches. Auto is the default and follows device rotation settings. Portrait or Landscape is requested only during ride mode; returning to setup restores automatic rotation. iOS can restrict orientation changes in iPad windowing/multitasking; the app reports a rejected request. Screen-awake behavior applies only while a ride is active in the foreground and the preference is enabled. Fullscreen black presentation is preserved. Returning from Spotify or another app preserves the current ride rather than resetting to setup.
+
+Double-tap uses the existing App Remote User API to read the current track, check its library state, and add it to Liked Songs. Already-liked tracks remain liked; this gesture never removes a song. Single-tap waits briefly for double-tap detection, so liking does not also pause playback. An **Add to Liked Songs** accessibility action is available. Overlay controls do not trigger the gesture. Success, already-liked, unsupported-item, failure, and timeout feedback is shown and announced; requests are cancelled on backgrounding/disconnection, and stale callbacks are ignored. After adding, a separate library-state lookup confirms the result: reading the mutation response as a library state can crash inside SpotifyiOS 5.0.1. No additional OAuth scopes, redirect URI, Dashboard, signing, or Info.plist changes are required.
 
 ## Playlists
 
@@ -78,8 +85,8 @@ Close or the outside background dismisses the overlay. Its five-second inactivit
 | Path | Purpose |
 | --- | --- |
 | `RideWave/MyApp.swift` | App entry point |
-| `RideWave/ContentView.swift` | Tutorial, connection, ride screen, gestures, overlays |
-| `RideWave/RideWaveModel.swift` | Onboarding persistence and initial navigation |
+| `RideWave/ContentView.swift` | Setup, connection, ride screen, gestures, overlays |
+| `RideWave/RideWaveModel.swift` | Saved ride preferences and navigation |
 | `RideWave/Spotify/` | SDK lifecycle, Keychain sessions, configuration, Web API |
 | `RideWave/Playlists/` | Playlist selection, bubbles, artwork |
 | `RideWave/Contacts/` | Native picker, saved contacts, calling |
@@ -117,15 +124,16 @@ swiftc -parse-as-library RideWave/Playlists/PlaylistSelection.swift \
 /tmp/ridewave-playlist-checks
 ```
 
-Checks cover onboarding/session routing, mocked playlist pagination/deduplication, token retry limits, HTTP/network errors, callback validation, contact persistence/validation, and playlist selection/persistence/artwork URLs. They never dial or start music and do not validate the Spotify binary SDK, real Keychain entitlements, or UI layout. Debug launches also accept `-preview-page tutorial`, `-preview-page connect`, or `-preview-page ride` for UI inspection.
+Checks cover setup routing and preference persistence, mocked playlist pagination/deduplication, token retry limits, HTTP/network errors, callback validation, contact persistence/validation, and playlist selection/persistence/artwork URLs. They never dial or start music and do not validate the Spotify binary SDK, real Keychain entitlements, or UI layout. Debug launches also accept `-preview-page setup`, `-preview-page connect`, or `-preview-page ride` for UI inspection.
 
 ## Device verification
 
 Before a release, record the device/account used and which cases passed. A signed build and the host checks have passed during development; the latest playlist playback/shuffle flow still requires end-to-end account verification.
 
 - Complete, cancel, deny, and retry each Spotify authorization flow. Confirm callback return preserves the playlist overlay and the two sessions remain independent.
-- Relaunch with a saved playback session; test expiry/renewal, revoked access, missing Spotify, disconnected playback, and background/foreground reconnect.
-- Verify live track state and tap/swipe actions. Confirm corner/overlay controls never trigger those gestures.
+- Confirm each fresh launch shows setup, including with a saved playback session. Change both preferences, relaunch, and verify persistence. Check Start ride, Close, Back to setup, portrait/landscape, Auto, and screen timeout with keep-awake off/on.
+- Start a ride with a saved playback session; test expiry/renewal, revoked access, missing Spotify, disconnected playback, and background/foreground reconnect.
+- Verify live track state and tap/swipe actions. Double-tap an unliked track and check Liked Songs without pausing; repeat to confirm it stays liked. Check podcast/local tracks, timeouts, disconnection, and the VoiceOver action. Confirm corner/overlay controls never trigger those gestures.
 - Load a library larger than 50 playlists. Save zero, two, and four choices; reopen/relaunch; replace choices; close without Done. Tap each bubble and confirm the intended playlist and shuffle in Spotify.
 - Add contacts with/without photos and multiple numbers; cancel the picker, try duplicates, remove choices, and relaunch. Use an agreed test contact to verify call confirmation/cancellation and return from Phone.
 - Check portrait/landscape, large text, VoiceOver, Switch Control, Reduce Motion, inactivity dismissal, and timer pause/reset behavior.

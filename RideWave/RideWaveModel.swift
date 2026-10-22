@@ -3,17 +3,30 @@ import Foundation
 
 // Screen navigation is separate from Spotify connection state.
 enum RidePage: String {
-    case tutorial, connect, ride
+    case setup, connect, ride
+}
+
+enum RideOrientation: String, CaseIterable, Identifiable {
+    case auto, portrait, landscape
+    var id: String { rawValue }
+    var title: String { rawValue.capitalized }
 }
 
 @MainActor
 final class RideWaveModel: ObservableObject {
-    @Published var page: RidePage
+    @Published var page: RidePage = .setup
+    @Published var orientation: RideOrientation {
+        didSet { defaults.set(orientation.rawValue, forKey: "ride_orientation") }
+    }
+    @Published var keepScreenAwake: Bool {
+        didSet { defaults.set(keepScreenAwake, forKey: "ride_keep_awake") }
+    }
     private let defaults: UserDefaults
 
-    init(defaults: UserDefaults = .standard, hasPlaybackSession: Bool = false) {
+    init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
-        page = hasPlaybackSession ? .ride : (defaults.bool(forKey: "onboarding_seen") ? .connect : .tutorial)
+        orientation = RideOrientation(rawValue: defaults.string(forKey: "ride_orientation") ?? "") ?? .auto
+        keepScreenAwake = defaults.object(forKey: "ride_keep_awake") as? Bool ?? true
         #if DEBUG
         if let index = ProcessInfo.processInfo.arguments.firstIndex(of: "-preview-page"),
            ProcessInfo.processInfo.arguments.indices.contains(index + 1),
@@ -23,9 +36,7 @@ final class RideWaveModel: ObservableObject {
         #endif
     }
 
-    func completeTutorial() {
-        defaults.set(true, forKey: "onboarding_seen")
-        page = .connect
-    }
-
+    func startRide(connected: Bool) { page = connected ? .ride : .connect }
+    func connectionEstablished() { if page == .connect { page = .ride } }
+    func closeRide() { page = .setup }
 }
